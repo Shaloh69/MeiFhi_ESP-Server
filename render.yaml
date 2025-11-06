@@ -1,0 +1,23 @@
+services:
+  # Main server for handling both Vaulter and CirquitIQ devices
+  - type: web
+    name: power-monitor-server
+    runtime: node          # ✅ replaces "env: node"
+    plan: free             # Change to 'starter' or higher for production
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+
+    envVars:               # ✅ correct way to define environment variables
+      - key: NODE_ENV
+        value: production
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        generateValue: true  # Auto-generate secure password
+        sync: false
+
+    disk:                  # ✅ Persistent disk config
+      name: data
+      mountPath: /app/data
+      sizeGB: 1

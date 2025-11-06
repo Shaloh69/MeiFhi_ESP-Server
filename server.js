@@ -1,19 +1,25 @@
 /*
- * ESP32 Electrical Safety Monitor - Node.js Server
- * Version: 2.0 - Enhanced with Admin Controls
+ * Multi-Device Electrical Safety Monitor - Node.js Server
+ * Version: 3.0 - Multi-Device Support (Vaulter + CirquitIQ)
+ * 
+ * SUPPORTED DEVICES:
+ * - Vaulter: Single-channel power monitor with SSR control
+ * - CirquitIQ: Dual-channel power monitor with 2 relay controls
  * 
  * Features:
- * - Real-time data reception from ESP32
+ * - Real-time data reception from multiple ESP32 devices
  * - WebSocket communication for live updates
  * - REST API for data access
  * - Web dashboard with real-time charts
  * - Data logging and storage
  * - Command sending to ESP32
- * - Multiple ESP32 device support
- * - ADMIN CONTROLS: Full ESP32 remote control
+ * - Multiple device support (both types)
+ * - ADMIN CONTROLS: Full remote control
  * - Mock data generator for testing without hardware
  * - Command history and logging
  * - Authentication support
+ * - Device type detection and handling
+ * - Render deployment ready
  */
 
 const express = require('express');
@@ -35,7 +41,12 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 // Initialize Express app
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server);
+const io = socketIo(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
 
 // Middleware
 app.use(express.json());
@@ -63,25 +74,25 @@ function basicAuth(req, res, next) {
 // Create data directory if it doesn't exist
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  console.log('✓ Created data directory');
+  console.log('âœ" Created data directory');
 }
 
 // Initialize log file if it doesn't exist
 if (!fs.existsSync(LOG_FILE)) {
   fs.writeFileSync(LOG_FILE, JSON.stringify({ sessions: [], readings: [] }, null, 2));
-  console.log('✓ Initialized log file');
+  console.log('âœ" Initialized log file');
 }
 
 // Initialize command log file
 if (!fs.existsSync(COMMAND_LOG_FILE)) {
   fs.writeFileSync(COMMAND_LOG_FILE, JSON.stringify({ commands: [] }, null, 2));
-  console.log('✓ Initialized command log file');
+  console.log('âœ" Initialized command log file');
 }
 
 // In-memory storage for active devices
 const activeDevices = new Map();
 const realtimeData = new Map();
-const deviceConfigs = new Map(); // Store device configurations
+const deviceConfigs = new Map();
 
 // Helper: Load data from file
 function loadData() {
@@ -134,7 +145,7 @@ function logCommand(deviceId, command, source, success = true) {
   const entry = {
     deviceId,
     command,
-    source, // 'api', 'admin', 'websocket'
+    source,
     success,
     timestamp: new Date().toISOString()
   };
@@ -172,11 +183,12 @@ function addReading(deviceId, reading) {
 }
 
 // Helper: Create session record
-function createSession(deviceId, ip) {
+function createSession(deviceId, ip, deviceType) {
   const data = loadData();
   
   const session = {
     deviceId,
+    deviceType,
     ip,
     startTime: new Date().toISOString(),
     endTime: null,
@@ -202,44 +214,79 @@ function endSession(deviceId) {
   saveData(data);
 }
 
-// ==================== MOCK DATA GENERATOR (FOR TESTING) ====================
+// ==================== MOCK DATA GENERATOR ====================
 
-// Generate realistic mock sensor data
-function generateMockData() {
-  const baseVoltage = 220 + (Math.random() - 0.5) * 10; // 215-225V
-  const baseCurrent = 0.5 + Math.random() * 2; // 0.5-2.5A
+// Generate realistic mock sensor data (for Vaulter - single channel)
+function generateMockDataVaulter() {
+  const baseVoltage = 220 + (Math.random() - 0.5) * 10;
+  const baseCurrent = 0.5 + Math.random() * 2;
   const powerFactor = 0.95;
   
   return {
+    deviceType: 'VAULTER',
     voltage: parseFloat(baseVoltage.toFixed(1)),
     current: parseFloat(baseCurrent.toFixed(3)),
     power: parseFloat((baseVoltage * baseCurrent * powerFactor).toFixed(1)),
     energy: parseFloat((Math.random() * 100).toFixed(3)),
-    ssrState: Math.random() > 0.1, // 90% on, 10% off
+    ssrState: Math.random() > 0.1,
     state: 'MONITOR',
     sensors: 'valid'
+  };
+}
+
+// Generate realistic mock sensor data (for CirquitIQ - dual channel)
+function generateMockDataCirquitIQ() {
+  const baseVoltage = 220 + (Math.random() - 0.5) * 10;
+  const ch1Current = 0.5 + Math.random() * 2;
+  const ch2Current = 0.5 + Math.random() * 2;
+  const powerFactor = 0.95;
+  
+  return {
+    deviceType: 'CIRQUITIQ',
+    voltage: parseFloat(baseVoltage.toFixed(1)),
+    state: 'MONITOR',
+    sensors: 'valid',
+    channel1: {
+      current: parseFloat(ch1Current.toFixed(3)),
+      power: parseFloat((baseVoltage * ch1Current * powerFactor).toFixed(1)),
+      energy: parseFloat((Math.random() * 100).toFixed(3)),
+      cost: parseFloat((Math.random() * 10).toFixed(2)),
+      relayState: Math.random() > 0.1
+    },
+    channel2: {
+      current: parseFloat(ch2Current.toFixed(3)),
+      power: parseFloat((baseVoltage * ch2Current * powerFactor).toFixed(1)),
+      energy: parseFloat((Math.random() * 100).toFixed(3)),
+      cost: parseFloat((Math.random() * 10).toFixed(2)),
+      relayState: Math.random() > 0.1
+    },
+    totalPower: parseFloat(((baseVoltage * ch1Current * powerFactor) + (baseVoltage * ch2Current * powerFactor)).toFixed(1)),
+    totalEnergy: parseFloat((Math.random() * 200).toFixed(3)),
+    totalCost: parseFloat((Math.random() * 20).toFixed(2))
   };
 }
 
 // POST endpoint to generate mock data (for testing without ESP32)
 app.post('/api/mock/data/:deviceId', (req, res) => {
   const { deviceId } = req.params;
+  const deviceType = req.query.type || 'VAULTER'; // Default to VAULTER
   const count = parseInt(req.query.count) || 1;
   
   const readings = [];
   
   for (let i = 0; i < count; i++) {
-    const mockData = generateMockData();
+    const mockData = deviceType === 'CIRQUITIQ' ? generateMockDataCirquitIQ() : generateMockDataVaulter();
     
     // Register device if new
     if (!activeDevices.has(deviceId)) {
       activeDevices.set(deviceId, {
+        deviceType: deviceType,
         ip: req.ip || 'mock',
         connectedAt: new Date().toISOString(),
         lastSeen: new Date().toISOString(),
         isMock: true
       });
-      createSession(deviceId, 'mock');
+      createSession(deviceId, 'mock', deviceType);
     } else {
       const device = activeDevices.get(deviceId);
       device.lastSeen = new Date().toISOString();
@@ -256,6 +303,7 @@ app.post('/api/mock/data/:deviceId', (req, res) => {
     // Broadcast to all connected web clients
     io.emit('sensorData', {
       deviceId,
+      deviceType,
       ...mockData,
       timestamp: entry.timestamp
     });
@@ -265,7 +313,7 @@ app.post('/api/mock/data/:deviceId', (req, res) => {
   
   res.json({
     success: true,
-    message: `Generated ${count} mock reading(s)`,
+    message: `Generated ${count} mock reading(s) for ${deviceType}`,
     readings: readings
   });
 });
@@ -279,7 +327,8 @@ app.get('/api/health', (req, res) => {
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
     activeDevices: activeDevices.size,
-    version: '2.0'
+    version: '3.0',
+    supportedDevices: ['VAULTER', 'CIRQUITIQ']
   });
 });
 
@@ -292,6 +341,22 @@ app.get('/api/devices', (req, res) => {
     currentData: realtimeData.get(id) || null,
     config: deviceConfigs.get(id) || null
   }));
+  
+  res.json(devices);
+});
+
+// Get devices by type
+app.get('/api/devices/type/:deviceType', (req, res) => {
+  const { deviceType } = req.params;
+  const devices = Array.from(activeDevices.entries())
+    .filter(([id, device]) => device.deviceType === deviceType.toUpperCase())
+    .map(([id, device]) => ({
+      deviceId: id,
+      ...device,
+      lastSeen: realtimeData.get(id)?.timestamp || null,
+      currentData: realtimeData.get(id) || null,
+      config: deviceConfigs.get(id) || null
+    }));
   
   res.json(devices);
 });
@@ -331,12 +396,17 @@ app.get('/api/readings', (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
   const offset = parseInt(req.query.offset) || 0;
   const deviceId = req.query.deviceId;
+  const deviceType = req.query.deviceType;
   
   const data = loadData();
   let readings = data.readings;
   
   if (deviceId) {
     readings = readings.filter(r => r.deviceId === deviceId);
+  }
+  
+  if (deviceType) {
+    readings = readings.filter(r => r.deviceType === deviceType.toUpperCase());
   }
   
   const total = readings.length;
@@ -354,11 +424,16 @@ app.get('/api/readings', (req, res) => {
 app.get('/api/sessions', (req, res) => {
   const data = loadData();
   const deviceId = req.query.deviceId;
+  const deviceType = req.query.deviceType;
   
   let sessions = data.sessions;
   
   if (deviceId) {
     sessions = sessions.filter(s => s.deviceId === deviceId);
+  }
+  
+  if (deviceType) {
+    sessions = sessions.filter(s => s.deviceType === deviceType.toUpperCase());
   }
   
   res.json(sessions);
@@ -378,31 +453,52 @@ app.get('/api/stats', (req, res) => {
     return res.json({ error: 'No data available' });
   }
   
-  const voltages = readings.map(r => r.voltage).filter(v => v != null);
-  const currents = readings.map(r => r.current).filter(c => c != null);
-  const powers = readings.map(r => r.power).filter(p => p != null);
-  
-  const stats = {
-    totalReadings: readings.length,
+  // For Vaulter devices
+  const vaulterReadings = readings.filter(r => r.deviceType === 'VAULTER' || !r.deviceType);
+  const vaulterStats = vaulterReadings.length > 0 ? {
+    totalReadings: vaulterReadings.length,
     voltage: {
-      min: Math.min(...voltages),
-      max: Math.max(...voltages),
-      avg: voltages.reduce((a, b) => a + b, 0) / voltages.length
+      min: Math.min(...vaulterReadings.map(r => r.voltage).filter(v => v != null)),
+      max: Math.max(...vaulterReadings.map(r => r.voltage).filter(v => v != null)),
+      avg: vaulterReadings.map(r => r.voltage).filter(v => v != null).reduce((a, b) => a + b, 0) / vaulterReadings.filter(r => r.voltage != null).length
     },
     current: {
-      min: Math.min(...currents),
-      max: Math.max(...currents),
-      avg: currents.reduce((a, b) => a + b, 0) / currents.length
+      min: Math.min(...vaulterReadings.map(r => r.current).filter(c => c != null)),
+      max: Math.max(...vaulterReadings.map(r => r.current).filter(c => c != null)),
+      avg: vaulterReadings.map(r => r.current).filter(c => c != null).reduce((a, b) => a + b, 0) / vaulterReadings.filter(r => r.current != null).length
     },
     power: {
-      min: Math.min(...powers),
-      max: Math.max(...powers),
-      avg: powers.reduce((a, b) => a + b, 0) / powers.length,
-      total: powers.reduce((a, b) => a + b, 0)
+      min: Math.min(...vaulterReadings.map(r => r.power).filter(p => p != null)),
+      max: Math.max(...vaulterReadings.map(r => r.power).filter(p => p != null)),
+      avg: vaulterReadings.map(r => r.power).filter(p => p != null).reduce((a, b) => a + b, 0) / vaulterReadings.filter(r => r.power != null).length
     }
-  };
+  } : null;
   
-  res.json(stats);
+  // For CirquitIQ devices
+  const cirquitiqReadings = readings.filter(r => r.deviceType === 'CIRQUITIQ');
+  const cirquitiqStats = cirquitiqReadings.length > 0 ? {
+    totalReadings: cirquitiqReadings.length,
+    voltage: {
+      min: Math.min(...cirquitiqReadings.map(r => r.voltage).filter(v => v != null)),
+      max: Math.max(...cirquitiqReadings.map(r => r.voltage).filter(v => v != null)),
+      avg: cirquitiqReadings.map(r => r.voltage).filter(v => v != null).reduce((a, b) => a + b, 0) / cirquitiqReadings.filter(r => r.voltage != null).length
+    },
+    channel1: {
+      avgCurrent: cirquitiqReadings.map(r => r.channel1?.current || 0).reduce((a, b) => a + b, 0) / cirquitiqReadings.length,
+      avgPower: cirquitiqReadings.map(r => r.channel1?.power || 0).reduce((a, b) => a + b, 0) / cirquitiqReadings.length,
+      totalEnergy: cirquitiqReadings.map(r => r.channel1?.energy || 0).reduce((a, b) => a + b, 0)
+    },
+    channel2: {
+      avgCurrent: cirquitiqReadings.map(r => r.channel2?.current || 0).reduce((a, b) => a + b, 0) / cirquitiqReadings.length,
+      avgPower: cirquitiqReadings.map(r => r.channel2?.power || 0).reduce((a, b) => a + b, 0) / cirquitiqReadings.length,
+      totalEnergy: cirquitiqReadings.map(r => r.channel2?.energy || 0).reduce((a, b) => a + b, 0)
+    }
+  } : null;
+  
+  res.json({
+    vaulter: vaulterStats,
+    cirquitiq: cirquitiqStats
+  });
 });
 
 // ==================== ESP32 DATA ENDPOINT ====================
@@ -411,47 +507,78 @@ app.get('/api/stats', (req, res) => {
 app.post('/api/data', (req, res) => {
   const {
     deviceId,
+    deviceType,
     voltage,
     current,
     power,
     energy,
     ssrState,
     state,
-    sensors
+    sensors,
+    channel1,
+    channel2,
+    totalPower,
+    totalEnergy,
+    totalCost
   } = req.body;
   
   if (!deviceId) {
     return res.status(400).json({ error: 'Device ID required' });
   }
   
+  // Detect device type if not provided
+  let detectedType = deviceType || 'VAULTER';
+  if (channel1 || channel2) {
+    detectedType = 'CIRQUITIQ';
+  }
+  
   // Register device if new
   if (!activeDevices.has(deviceId)) {
     const ip = req.ip || req.connection.remoteAddress;
     activeDevices.set(deviceId, {
+      deviceType: detectedType,
       ip,
       connectedAt: new Date().toISOString(),
       lastSeen: new Date().toISOString(),
       isMock: false
     });
     
-    createSession(deviceId, ip);
-    console.log(`✓ New device connected: ${deviceId} from ${ip}`);
+    createSession(deviceId, ip, detectedType);
+    console.log(`âœ" New device connected: ${deviceId} (${detectedType}) from ${ip}`);
   } else {
     // Update last seen
     const device = activeDevices.get(deviceId);
     device.lastSeen = new Date().toISOString();
+    device.deviceType = detectedType; // Update device type if changed
   }
   
-  // Store reading
-  const reading = {
-    voltage: parseFloat(voltage),
-    current: parseFloat(current),
-    power: parseFloat(power),
-    energy: parseFloat(energy),
-    ssrState: ssrState === 'true' || ssrState === true || ssrState === 1,
-    state: state || 'unknown',
-    sensors: sensors || 'unknown'
-  };
+  // Store reading based on device type
+  let reading;
+  
+  if (detectedType === 'CIRQUITIQ') {
+    reading = {
+      deviceType: 'CIRQUITIQ',
+      voltage: parseFloat(voltage),
+      state: state || 'unknown',
+      sensors: sensors || 'unknown',
+      channel1: channel1 || {},
+      channel2: channel2 || {},
+      totalPower: parseFloat(totalPower) || 0,
+      totalEnergy: parseFloat(totalEnergy) || 0,
+      totalCost: parseFloat(totalCost) || 0
+    };
+  } else {
+    reading = {
+      deviceType: 'VAULTER',
+      voltage: parseFloat(voltage),
+      current: parseFloat(current),
+      power: parseFloat(power),
+      energy: parseFloat(energy),
+      ssrState: ssrState === 'true' || ssrState === true || ssrState === 1,
+      state: state || 'unknown',
+      sensors: sensors || 'unknown'
+    };
+  }
   
   const entry = addReading(deviceId, reading);
   
@@ -464,6 +591,7 @@ app.post('/api/data', (req, res) => {
   // Broadcast to all connected web clients
   io.emit('sensorData', {
     deviceId,
+    deviceType: detectedType,
     ...reading,
     timestamp: entry.timestamp
   });
@@ -471,7 +599,8 @@ app.post('/api/data', (req, res) => {
   res.json({
     success: true,
     timestamp: entry.timestamp,
-    message: 'Data received'
+    message: 'Data received',
+    deviceType: detectedType
   });
 });
 
@@ -495,150 +624,205 @@ app.get('/api/admin/commands', basicAuth, (req, res) => {
   });
 });
 
-// Get available commands
+// Get available commands based on device type
 app.get('/api/admin/commands/available', (req, res) => {
-  res.json({
-    commands: [
-      {
-        name: 'on',
-        description: 'Turn SSR ON (normal operation)',
-        category: 'SSR Control',
-        parameters: null
-      },
-      {
-        name: 'off',
-        description: 'Turn SSR OFF (manual disable)',
-        category: 'SSR Control',
-        parameters: null
-      },
-      {
-        name: 'enable',
-        description: 'Enable SSR (alias for on)',
-        category: 'SSR Control',
-        parameters: null
-      },
-      {
-        name: 'disable',
-        description: 'Disable SSR (alias for off)',
-        category: 'SSR Control',
-        parameters: null
-      },
-      {
-        name: 'reset',
-        description: 'Emergency reset system',
-        category: 'System Control',
-        parameters: null
-      },
-      {
-        name: 'restart',
-        description: 'Restart ESP32',
-        category: 'System Control',
-        parameters: null
-      },
-      {
-        name: 'calibrate',
-        description: 'Start manual calibration',
-        category: 'Calibration',
-        parameters: null
-      },
-      {
-        name: 'cal_voltage',
-        description: 'Start voltage calibration wizard',
-        category: 'Calibration',
-        parameters: null
-      },
-      {
-        name: 'voltage_cal',
-        description: 'Set voltage calibration factor',
-        category: 'Calibration',
-        parameters: 'number (0.01-1000)'
-      },
-      {
-        name: 'current_cal',
-        description: 'Set current calibration factor',
-        category: 'Calibration',
-        parameters: 'number (0.001-100)'
-      },
-      {
-        name: 'power_factor',
-        description: 'Set power factor',
-        category: 'Settings',
-        parameters: 'number (0.1-1.0)'
-      },
-      {
-        name: 'status',
-        description: 'Get current status',
-        category: 'Information',
-        parameters: null
-      },
-      {
-        name: 'test',
-        description: 'Test sensors',
-        category: 'Diagnostics',
-        parameters: null
-      },
-      {
-        name: 'diag',
-        description: 'Full diagnostics',
-        category: 'Diagnostics',
-        parameters: null
-      },
-      {
-        name: 'diagnostics',
-        description: 'Full diagnostics (alias)',
-        category: 'Diagnostics',
-        parameters: null
-      },
-      {
-        name: 'mem',
-        description: 'Memory usage',
-        category: 'Diagnostics',
-        parameters: null
-      },
-      {
-        name: 'memory',
-        description: 'Memory usage (alias)',
-        category: 'Diagnostics',
-        parameters: null
-      },
-      {
-        name: 'stats',
-        description: 'Show statistics',
-        category: 'Information',
-        parameters: null
-      },
-      {
-        name: 'manual',
-        description: 'Toggle manual mode',
-        category: 'Settings',
-        parameters: null
-      },
-      {
-        name: 'safety',
-        description: 'Toggle safety checks',
-        category: 'Settings',
-        parameters: null
-      },
-      {
-        name: 'buzzer',
-        description: 'Toggle buzzer',
-        category: 'Settings',
-        parameters: null
-      },
-      {
-        name: 'clear',
-        description: 'Clear statistics',
-        category: 'Settings',
-        parameters: null
-      },
-      {
-        name: 'help',
-        description: 'Show command menu',
-        category: 'Information',
-        parameters: null
-      }
-    ]
-  });
+  const deviceType = req.query.deviceType || 'VAULTER';
+  
+  const vaulterCommands = [
+    {
+      name: 'on',
+      description: 'Turn SSR ON (normal operation)',
+      category: 'SSR Control',
+      deviceType: 'VAULTER',
+      parameters: null
+    },
+    {
+      name: 'off',
+      description: 'Turn SSR OFF (manual disable)',
+      category: 'SSR Control',
+      deviceType: 'VAULTER',
+      parameters: null
+    },
+    {
+      name: 'enable',
+      description: 'Enable SSR (alias for on)',
+      category: 'SSR Control',
+      deviceType: 'VAULTER',
+      parameters: null
+    },
+    {
+      name: 'disable',
+      description: 'Disable SSR (alias for off)',
+      category: 'SSR Control',
+      deviceType: 'VAULTER',
+      parameters: null
+    }
+  ];
+  
+  const cirquitiqCommands = [
+    {
+      name: 'on 1',
+      description: 'Turn Relay 1 ON',
+      category: 'Relay Control',
+      deviceType: 'CIRQUITIQ',
+      parameters: null
+    },
+    {
+      name: 'on 2',
+      description: 'Turn Relay 2 ON',
+      category: 'Relay Control',
+      deviceType: 'CIRQUITIQ',
+      parameters: null
+    },
+    {
+      name: 'on all',
+      description: 'Turn Both Relays ON',
+      category: 'Relay Control',
+      deviceType: 'CIRQUITIQ',
+      parameters: null
+    },
+    {
+      name: 'off 1',
+      description: 'Turn Relay 1 OFF',
+      category: 'Relay Control',
+      deviceType: 'CIRQUITIQ',
+      parameters: null
+    },
+    {
+      name: 'off 2',
+      description: 'Turn Relay 2 OFF',
+      category: 'Relay Control',
+      deviceType: 'CIRQUITIQ',
+      parameters: null
+    },
+    {
+      name: 'off all',
+      description: 'Turn Both Relays OFF',
+      category: 'Relay Control',
+      deviceType: 'CIRQUITIQ',
+      parameters: null
+    }
+  ];
+  
+  const commonCommands = [
+    {
+      name: 'reset',
+      description: 'Emergency reset system',
+      category: 'System Control',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'restart',
+      description: 'Restart ESP32',
+      category: 'System Control',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'calibrate',
+      description: 'Start manual calibration',
+      category: 'Calibration',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'cal_voltage',
+      description: 'Start voltage calibration wizard',
+      category: 'Calibration',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'voltage_cal',
+      description: 'Set voltage calibration factor',
+      category: 'Calibration',
+      deviceType: 'ALL',
+      parameters: 'number (0.01-1000)'
+    },
+    {
+      name: 'current_cal',
+      description: 'Set current calibration factor',
+      category: 'Calibration',
+      deviceType: 'ALL',
+      parameters: 'number (0.001-100)'
+    },
+    {
+      name: 'power_factor',
+      description: 'Set power factor',
+      category: 'Settings',
+      deviceType: 'ALL',
+      parameters: 'number (0.1-1.0)'
+    },
+    {
+      name: 'status',
+      description: 'Get current status',
+      category: 'Information',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'test',
+      description: 'Test sensors',
+      category: 'Diagnostics',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'diag',
+      description: 'Full diagnostics',
+      category: 'Diagnostics',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'stats',
+      description: 'Show statistics',
+      category: 'Information',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'manual',
+      description: 'Toggle manual mode',
+      category: 'Settings',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'safety',
+      description: 'Toggle safety checks',
+      category: 'Settings',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'buzzer',
+      description: 'Toggle buzzer',
+      category: 'Settings',
+      deviceType: 'ALL',
+      parameters: null
+    },
+    {
+      name: 'clear',
+      description: 'Clear statistics',
+      category: 'Settings',
+      deviceType: 'ALL',
+      parameters: null
+    }
+  ];
+  
+  let commands = [...commonCommands];
+  
+  if (deviceType.toUpperCase() === 'VAULTER') {
+    commands = [...vaulterCommands, ...commands];
+  } else if (deviceType.toUpperCase() === 'CIRQUITIQ') {
+    commands = [...cirquitiqCommands, ...commands];
+  } else {
+    commands = [...vaulterCommands, ...cirquitiqCommands, ...commands];
+  }
+  
+  res.json({ commands });
 });
 
 // Send command to specific device (with auth)
@@ -654,6 +838,8 @@ app.post('/api/admin/command/:deviceId', basicAuth, (req, res) => {
     return res.status(400).json({ error: 'Command required' });
   }
   
+  const device = activeDevices.get(deviceId);
+  
   // Build full command with parameters if provided
   let fullCommand = command;
   if (parameters) {
@@ -666,56 +852,89 @@ app.post('/api/admin/command/:deviceId', basicAuth, (req, res) => {
   // Emit command to specific device
   io.emit('command', { deviceId, command: fullCommand });
   
-  console.log(`→ Admin command sent to ${deviceId}: ${fullCommand}`);
+  console.log(`â†' Admin command sent to ${deviceId} (${device.deviceType}): ${fullCommand}`);
   
   res.json({
     success: true,
     deviceId,
+    deviceType: device.deviceType,
     command: fullCommand,
     timestamp: new Date().toISOString()
   });
 });
 
-// SSR Control - Turn ON
-app.post('/api/admin/ssr/:deviceId/on', basicAuth, (req, res) => {
+// Relay/SSR Control - Turn ON
+app.post('/api/admin/relay/:deviceId/on', basicAuth, (req, res) => {
   const { deviceId } = req.params;
+  const channel = req.query.channel; // Optional: 1, 2, or 'all' for CirquitIQ
   
   if (!activeDevices.has(deviceId)) {
     return res.status(404).json({ error: 'Device not found or offline' });
   }
   
-  const command = 'on';
+  const device = activeDevices.get(deviceId);
+  let command;
+  
+  if (device.deviceType === 'CIRQUITIQ') {
+    if (channel === '1') {
+      command = 'on 1';
+    } else if (channel === '2') {
+      command = 'on 2';
+    } else {
+      command = 'on all';
+    }
+  } else {
+    command = 'on';
+  }
+  
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
   
-  console.log(`→ Admin SSR ON: ${deviceId}`);
+  console.log(`â†' Admin Relay ON: ${deviceId} (${device.deviceType}) - ${command}`);
   
   res.json({
     success: true,
     deviceId,
-    action: 'SSR turned ON',
+    deviceType: device.deviceType,
+    action: `Relay turned ON: ${command}`,
     timestamp: new Date().toISOString()
   });
 });
 
-// SSR Control - Turn OFF
-app.post('/api/admin/ssr/:deviceId/off', basicAuth, (req, res) => {
+// Relay/SSR Control - Turn OFF
+app.post('/api/admin/relay/:deviceId/off', basicAuth, (req, res) => {
   const { deviceId } = req.params;
+  const channel = req.query.channel; // Optional: 1, 2, or 'all' for CirquitIQ
   
   if (!activeDevices.has(deviceId)) {
     return res.status(404).json({ error: 'Device not found or offline' });
   }
   
-  const command = 'off';
+  const device = activeDevices.get(deviceId);
+  let command;
+  
+  if (device.deviceType === 'CIRQUITIQ') {
+    if (channel === '1') {
+      command = 'off 1';
+    } else if (channel === '2') {
+      command = 'off 2';
+    } else {
+      command = 'off all';
+    }
+  } else {
+    command = 'off';
+  }
+  
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
   
-  console.log(`→ Admin SSR OFF: ${deviceId}`);
+  console.log(`â†' Admin Relay OFF: ${deviceId} (${device.deviceType}) - ${command}`);
   
   res.json({
     success: true,
     deviceId,
-    action: 'SSR turned OFF',
+    deviceType: device.deviceType,
+    action: `Relay turned OFF: ${command}`,
     timestamp: new Date().toISOString()
   });
 });
@@ -728,15 +947,17 @@ app.post('/api/admin/system/:deviceId/reset', basicAuth, (req, res) => {
     return res.status(404).json({ error: 'Device not found or offline' });
   }
   
+  const device = activeDevices.get(deviceId);
   const command = 'reset';
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
   
-  console.log(`→ Admin RESET: ${deviceId}`);
+  console.log(`â†' Admin RESET: ${deviceId} (${device.deviceType})`);
   
   res.json({
     success: true,
     deviceId,
+    deviceType: device.deviceType,
     action: 'System reset initiated',
     timestamp: new Date().toISOString()
   });
@@ -750,15 +971,17 @@ app.post('/api/admin/system/:deviceId/restart', basicAuth, (req, res) => {
     return res.status(404).json({ error: 'Device not found or offline' });
   }
   
+  const device = activeDevices.get(deviceId);
   const command = 'restart';
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
   
-  console.log(`→ Admin RESTART: ${deviceId}`);
+  console.log(`â†' Admin RESTART: ${deviceId} (${device.deviceType})`);
   
   res.json({
     success: true,
     deviceId,
+    deviceType: device.deviceType,
     action: 'ESP32 restart initiated',
     timestamp: new Date().toISOString()
   });
@@ -772,15 +995,17 @@ app.post('/api/admin/calibration/:deviceId/start', basicAuth, (req, res) => {
     return res.status(404).json({ error: 'Device not found or offline' });
   }
   
+  const device = activeDevices.get(deviceId);
   const command = 'calibrate';
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
   
-  console.log(`→ Admin CALIBRATE: ${deviceId}`);
+  console.log(`â†' Admin CALIBRATE: ${deviceId} (${device.deviceType})`);
   
   res.json({
     success: true,
     deviceId,
+    deviceType: device.deviceType,
     action: 'Calibration started',
     timestamp: new Date().toISOString()
   });
@@ -799,8 +1024,10 @@ app.post('/api/admin/config/:deviceId', basicAuth, (req, res) => {
     return res.status(400).json({ error: 'Parameter and value required' });
   }
   
+  const device = activeDevices.get(deviceId);
+  
   // Valid parameters
-  const validParams = ['power_factor', 'voltage_cal', 'current_cal'];
+  const validParams = ['power_factor', 'voltage_cal', 'current_cal', 'ch1_cal', 'ch2_cal', 'rate'];
   
   if (!validParams.includes(parameter)) {
     return res.status(400).json({ 
@@ -821,11 +1048,12 @@ app.post('/api/admin/config/:deviceId', basicAuth, (req, res) => {
   config[parameter] = value;
   config.lastUpdated = new Date().toISOString();
   
-  console.log(`→ Admin CONFIG: ${deviceId} - ${parameter} = ${value}`);
+  console.log(`â†' Admin CONFIG: ${deviceId} (${device.deviceType}) - ${parameter} = ${value}`);
   
   res.json({
     success: true,
     deviceId,
+    deviceType: device.deviceType,
     parameter,
     value,
     timestamp: new Date().toISOString()
@@ -840,7 +1068,8 @@ app.post('/api/admin/toggle/:deviceId/:setting', basicAuth, (req, res) => {
     return res.status(404).json({ error: 'Device not found or offline' });
   }
   
-  const validSettings = ['manual', 'safety', 'buzzer'];
+  const device = activeDevices.get(deviceId);
+  const validSettings = ['manual', 'safety', 'buzzer', 'display'];
   
   if (!validSettings.includes(setting)) {
     return res.status(400).json({ 
@@ -853,11 +1082,12 @@ app.post('/api/admin/toggle/:deviceId/:setting', basicAuth, (req, res) => {
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
   
-  console.log(`→ Admin TOGGLE ${setting.toUpperCase()}: ${deviceId}`);
+  console.log(`â†' Admin TOGGLE ${setting.toUpperCase()}: ${deviceId} (${device.deviceType})`);
   
   res.json({
     success: true,
     deviceId,
+    deviceType: device.deviceType,
     setting,
     action: `${setting} toggled`,
     timestamp: new Date().toISOString()
@@ -872,6 +1102,7 @@ app.get('/api/admin/diagnostics/:deviceId', basicAuth, (req, res) => {
     return res.status(404).json({ error: 'Device not found or offline' });
   }
   
+  const device = activeDevices.get(deviceId);
   const command = 'diag';
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
@@ -879,6 +1110,7 @@ app.get('/api/admin/diagnostics/:deviceId', basicAuth, (req, res) => {
   res.json({
     success: true,
     deviceId,
+    deviceType: device.deviceType,
     message: 'Diagnostics requested - check device serial output',
     timestamp: new Date().toISOString()
   });
@@ -901,15 +1133,16 @@ app.post('/api/admin/command/batch', basicAuth, (req, res) => {
   
   deviceIds.forEach(deviceId => {
     if (activeDevices.has(deviceId)) {
+      const device = activeDevices.get(deviceId);
       logCommand(deviceId, fullCommand, 'admin', true);
       io.emit('command', { deviceId, command: fullCommand });
-      results.push({ deviceId, success: true });
+      results.push({ deviceId, deviceType: device.deviceType, success: true });
     } else {
       results.push({ deviceId, success: false, error: 'Device not found' });
     }
   });
   
-  console.log(`→ Admin BATCH command to ${deviceIds.length} devices: ${fullCommand}`);
+  console.log(`â†' Admin BATCH command to ${deviceIds.length} devices: ${fullCommand}`);
   
   res.json({
     success: true,
@@ -922,25 +1155,35 @@ app.post('/api/admin/command/batch', basicAuth, (req, res) => {
 // ==================== WEBSOCKET HANDLING ====================
 
 io.on('connection', (socket) => {
-  console.log('✓ Web client connected:', socket.id);
+  console.log('âœ" Web client connected:', socket.id);
   
   // Send current active devices and latest data
-  socket.emit('activeDevices', Array.from(activeDevices.keys()));
+  const devices = Array.from(activeDevices.entries()).map(([id, device]) => ({
+    deviceId: id,
+    deviceType: device.deviceType
+  }));
+  socket.emit('activeDevices', devices);
   
   realtimeData.forEach((data, deviceId) => {
-    socket.emit('sensorData', { deviceId, ...data });
+    const device = activeDevices.get(deviceId);
+    socket.emit('sensorData', { 
+      deviceId, 
+      deviceType: device?.deviceType,
+      ...data 
+    });
   });
   
   socket.on('disconnect', () => {
-    console.log('✗ Web client disconnected:', socket.id);
+    console.log('âœ— Web client disconnected:', socket.id);
   });
   
   // Handle command from web client
   socket.on('sendCommand', ({ deviceId, command }) => {
     if (activeDevices.has(deviceId)) {
+      const device = activeDevices.get(deviceId);
       logCommand(deviceId, command, 'websocket', true);
       io.emit('command', { deviceId, command });
-      console.log(`→ Command from web: ${command} to ${deviceId}`);
+      console.log(`â†' Command from web: ${command} to ${deviceId} (${device.deviceType})`);
     }
   });
 });
@@ -956,35 +1199,41 @@ setInterval(() => {
     const lastSeen = new Date(device.lastSeen).getTime();
     
     if (now - lastSeen > timeout) {
-      console.log(`⚠️  Device ${deviceId} timed out (no data for 60s)`);
+      console.log(`âš ï¸  Device ${deviceId} (${device.deviceType}) timed out (no data for 60s)`);
       activeDevices.delete(deviceId);
       endSession(deviceId);
       
-      io.emit('deviceDisconnected', deviceId);
+      io.emit('deviceDisconnected', { deviceId, deviceType: device.deviceType });
     }
   });
 }, 30000); // Check every 30 seconds
 
 // ==================== SERVER START ====================
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('ESP32 Monitoring Server Started');
-  console.log('Version 2.0 - Enhanced with Admin Controls');
+  console.log('Multi-Device Monitoring Server Started');
+  console.log('Version 3.0 - Vaulter + CirquitIQ Support');
   console.log('========================================');
   console.log(`Server running on port: ${PORT}`);
   console.log(`Dashboard: http://localhost:${PORT}`);
   console.log(`API: http://localhost:${PORT}/api`);
   console.log(`Admin API: http://localhost:${PORT}/api/admin`);
   console.log(`Data directory: ${DATA_DIR}`);
+  console.log('\n--- Supported Devices ---');
+  console.log('• Vaulter: Single-channel SSR monitor');
+  console.log('• CirquitIQ: Dual-channel relay monitor');
   console.log('\n--- Admin Credentials ---');
   console.log(`Username: ${ADMIN_USERNAME}`);
   console.log(`Password: ${ADMIN_PASSWORD}`);
   console.log('(Change via environment variables)');
   console.log('========================================\n');
-  console.log('📝 TESTING WITHOUT ESP32:');
-  console.log(`   POST http://localhost:${PORT}/api/mock/data/TEST_ESP32`);
+  console.log('ðŸ" TESTING WITHOUT HARDWARE:');
+  console.log(`   POST http://localhost:${PORT}/api/mock/data/TEST_VAULTER?type=VAULTER`);
+  console.log(`   POST http://localhost:${PORT}/api/mock/data/TEST_CIRQUITIQ?type=CIRQUITIQ`);
   console.log('   This will generate realistic mock data\n');
+  console.log('ðŸš€ RENDER DEPLOYMENT READY');
+  console.log('   PORT is automatically configured from environment\n');
   console.log('Waiting for ESP32 connections...\n');
 });
 
@@ -998,7 +1247,7 @@ process.on('SIGINT', () => {
   });
   
   server.close(() => {
-    console.log('✓ Server shut down gracefully');
+    console.log('âœ" Server shut down gracefully');
     process.exit(0);
   });
 });
