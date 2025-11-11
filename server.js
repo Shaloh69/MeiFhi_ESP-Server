@@ -24,6 +24,7 @@
 
 const express = require('express');
 const http = require('http');
+const WebSocket = require('ws');
 const socketIo = require('socket.io');
 const fs = require('fs');
 const path = require('path');
@@ -47,6 +48,12 @@ const io = socketIo(server, {
     methods: ["GET", "POST"]
   }
 });
+
+const wss = new WebSocket.Server({ 
+     server,
+     path: '/ws'
+   });
+   const esp32Connections = new Map();
 
 // Middleware
 app.use(express.json());
@@ -88,6 +95,24 @@ if (!fs.existsSync(COMMAND_LOG_FILE)) {
   fs.writeFileSync(COMMAND_LOG_FILE, JSON.stringify({ commands: [] }, null, 2));
   console.log('âœ" Initialized command log file');
 }
+
+function sendCommandToESP32(deviceId, command) {
+     const ws = esp32Connections.get(deviceId);
+     if (ws && ws.readyState === WebSocket.OPEN) {
+       const message = JSON.stringify({
+         deviceId,
+         command,
+         timestamp: new Date().toISOString()
+       });
+       ws.send(message);
+       console.log(`✓ Command sent to ESP32 ${deviceId}: ${command}`);
+       return true;
+     } else {
+       console.log(`✗ ESP32 ${deviceId} not connected via WebSocket`);
+       return false;
+     }
+   }
+
 
 // In-memory storage for active devices
 const activeDevices = new Map();
@@ -851,6 +876,7 @@ app.post('/api/admin/command/:deviceId', basicAuth, (req, res) => {
   
   // Emit command to specific device
   io.emit('command', { deviceId, command: fullCommand });
+  const sentToESP32 = sendCommandToESP32(deviceId, command);
   
   console.log(`â†' Admin command sent to ${deviceId} (${device.deviceType}): ${fullCommand}`);
   
@@ -859,6 +885,7 @@ app.post('/api/admin/command/:deviceId', basicAuth, (req, res) => {
     deviceId,
     deviceType: device.deviceType,
     command: fullCommand,
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -889,6 +916,7 @@ app.post('/api/admin/relay/:deviceId/on', basicAuth, (req, res) => {
   
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
+  const sentToESP32 = sendCommandToESP32(deviceId, command);
   
   console.log(`â†' Admin Relay ON: ${deviceId} (${device.deviceType}) - ${command}`);
   
@@ -897,6 +925,7 @@ app.post('/api/admin/relay/:deviceId/on', basicAuth, (req, res) => {
     deviceId,
     deviceType: device.deviceType,
     action: `Relay turned ON: ${command}`,
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -927,6 +956,7 @@ app.post('/api/admin/relay/:deviceId/off', basicAuth, (req, res) => {
   
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
+  const sentToESP32 = sendCommandToESP32(deviceId, command);
   
   console.log(`â†' Admin Relay OFF: ${deviceId} (${device.deviceType}) - ${command}`);
   
@@ -935,6 +965,7 @@ app.post('/api/admin/relay/:deviceId/off', basicAuth, (req, res) => {
     deviceId,
     deviceType: device.deviceType,
     action: `Relay turned OFF: ${command}`,
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -951,6 +982,7 @@ app.post('/api/admin/system/:deviceId/reset', basicAuth, (req, res) => {
   const command = 'reset';
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
+  const sentToESP32 = sendCommandToESP32(deviceId, command);
   
   console.log(`â†' Admin RESET: ${deviceId} (${device.deviceType})`);
   
@@ -959,6 +991,7 @@ app.post('/api/admin/system/:deviceId/reset', basicAuth, (req, res) => {
     deviceId,
     deviceType: device.deviceType,
     action: 'System reset initiated',
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -975,6 +1008,7 @@ app.post('/api/admin/system/:deviceId/restart', basicAuth, (req, res) => {
   const command = 'restart';
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
+  const sentToESP32 = sendCommandToESP32(deviceId, command);
   
   console.log(`â†' Admin RESTART: ${deviceId} (${device.deviceType})`);
   
@@ -983,6 +1017,7 @@ app.post('/api/admin/system/:deviceId/restart', basicAuth, (req, res) => {
     deviceId,
     deviceType: device.deviceType,
     action: 'ESP32 restart initiated',
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -999,6 +1034,7 @@ app.post('/api/admin/calibration/:deviceId/start', basicAuth, (req, res) => {
   const command = 'calibrate';
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
+  const sentToESP32 = sendCommandToESP32(deviceId, command);
   
   console.log(`â†' Admin CALIBRATE: ${deviceId} (${device.deviceType})`);
   
@@ -1007,6 +1043,7 @@ app.post('/api/admin/calibration/:deviceId/start', basicAuth, (req, res) => {
     deviceId,
     deviceType: device.deviceType,
     action: 'Calibration started',
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -1039,6 +1076,7 @@ app.post('/api/admin/config/:deviceId', basicAuth, (req, res) => {
   const command = `${parameter} ${value}`;
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
+  const sentToESP32 = sendCommandToESP32(deviceId, command);
   
   // Store in device config
   if (!deviceConfigs.has(deviceId)) {
@@ -1056,6 +1094,7 @@ app.post('/api/admin/config/:deviceId', basicAuth, (req, res) => {
     deviceType: device.deviceType,
     parameter,
     value,
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -1081,6 +1120,7 @@ app.post('/api/admin/toggle/:deviceId/:setting', basicAuth, (req, res) => {
   const command = setting;
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
+  const sentToESP32 = sendCommandToESP32(deviceId, command);
   
   console.log(`â†' Admin TOGGLE ${setting.toUpperCase()}: ${deviceId} (${device.deviceType})`);
   
@@ -1090,6 +1130,7 @@ app.post('/api/admin/toggle/:deviceId/:setting', basicAuth, (req, res) => {
     deviceType: device.deviceType,
     setting,
     action: `${setting} toggled`,
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -1106,12 +1147,14 @@ app.get('/api/admin/diagnostics/:deviceId', basicAuth, (req, res) => {
   const command = 'diag';
   logCommand(deviceId, command, 'admin', true);
   io.emit('command', { deviceId, command });
+  const sentToESP32 = sendCommandToESP32(deviceId, command);
   
   res.json({
     success: true,
     deviceId,
     deviceType: device.deviceType,
     message: 'Diagnostics requested - check device serial output',
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -1136,6 +1179,7 @@ app.post('/api/admin/command/batch', basicAuth, (req, res) => {
       const device = activeDevices.get(deviceId);
       logCommand(deviceId, fullCommand, 'admin', true);
       io.emit('command', { deviceId, command: fullCommand });
+      const sentToESP32 = sendCommandToESP32(deviceId, fullCommand);
       results.push({ deviceId, deviceType: device.deviceType, success: true });
     } else {
       results.push({ deviceId, success: false, error: 'Device not found' });
@@ -1148,6 +1192,7 @@ app.post('/api/admin/command/batch', basicAuth, (req, res) => {
     success: true,
     command: fullCommand,
     results,
+    sentToESP32,
     timestamp: new Date().toISOString()
   });
 });
@@ -1208,6 +1253,81 @@ setInterval(() => {
   });
 }, 30000); // Check every 30 seconds
 
+wss.on('connection', (ws, req) => {
+     console.log('✓ New WebSocket connection from:', req.socket.remoteAddress);
+     
+     let deviceId = null;
+     let deviceType = null;
+     let pingInterval = null;
+     
+     ws.send(JSON.stringify({
+       type: 'welcome',
+       message: 'Connected to CircuitIQ server',
+       timestamp: new Date().toISOString()
+     }));
+     
+     ws.on('message', (message) => {
+       try {
+         const data = JSON.parse(message.toString());
+         
+         if (data.type === 'register') {
+           deviceId = data.deviceId;
+           deviceType = data.deviceType || 'CIRQUITIQ';
+           esp32Connections.set(deviceId, ws);
+           console.log(`✓ ESP32 device registered: ${deviceId} (${deviceType})`);
+           
+           ws.send(JSON.stringify({
+             type: 'registered',
+             deviceId,
+             deviceType,
+             timestamp: new Date().toISOString()
+           }));
+           
+           pingInterval = setInterval(() => {
+             if (ws.readyState === WebSocket.OPEN) {
+               ws.ping();
+             }
+           }, 30000);
+         } 
+         else if (data.type === 'commandAck') {
+           console.log(`✓ Command acknowledged by ${deviceId}: ${data.command}`);
+           logCommand(deviceId || 'unknown', data.command, 'esp32-ack', data.success);
+           io.emit('commandAck', {
+             deviceId,
+             command: data.command,
+             success: data.success,
+             timestamp: new Date().toISOString()
+           });
+         }
+         else if (data.type === 'ping') {
+           ws.send(JSON.stringify({
+             type: 'pong',
+             timestamp: new Date().toISOString()
+           }));
+         }
+       } catch (error) {
+         console.error('Error parsing WebSocket message:', error);
+       }
+     });
+     
+     ws.on('error', (error) => {
+       console.error('WebSocket error:', error);
+     });
+     
+     ws.on('close', () => {
+       if (deviceId) {
+         console.log(`✗ ESP32 disconnected: ${deviceId}`);
+         esp32Connections.delete(deviceId);
+         if (pingInterval) {
+           clearInterval(pingInterval);
+         }
+       }
+     });
+     
+     ws.on('pong', () => {
+       // Connection alive
+     });
+   });
 // ==================== SERVER START ====================
 
 server.listen(PORT, '0.0.0.0', () => {
@@ -1246,6 +1366,11 @@ process.on('SIGINT', () => {
     endSession(deviceId);
   });
   
+esp32Connections.forEach((ws, deviceId) => {
+     console.log(`Closing connection to ${deviceId}...`);
+     ws.close();
+   });
+
   server.close(() => {
     console.log('âœ" Server shut down gracefully');
     process.exit(0);
